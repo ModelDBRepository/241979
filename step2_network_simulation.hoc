@@ -1,0 +1,597 @@
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Convergence Connections in Feedforward network L1 = Poisson Generator Cells , L2 = E cells
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+load_file("nrngui.hoc") //load basics library
+T_everythng = startsw()
+load_file("ranstream.hoc") //for InGauss random seed
+load_file("Parameters.hoc") //Parameters
+load_file("CellsTemplate.hoc") //load basics library/cells' template  Note: Parameters for Cells template are specified inside
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Variables initialization
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// These are the default values
+// They may get overwrite when the simulation is called at the end of this script
+
+// Constant
+RANDOM123_ID1_POISSONSPK = 1 // ID 1 = feed forward input from L1 to L2
+
+// Simulation Setting
+//CELL_TYPE = 1 -----------------------------------------------------------------------
+TRIAL_NO = 1 // Initialization purpose only
+CONVERGENT_TYPE = 1 // Initialization purpose only
+
+strdef CnvrgentConnTypeTxt 
+proc get_CnvrgentConnTypeTxt() {
+
+if(CONVERGENT_TYPE ==1){ CnvrgentConnTypeTxt  = "GG"} 
+if(CONVERGENT_TYPE ==2){ CnvrgentConnTypeTxt  = "UC"} 
+if(CONVERGENT_TYPE ==3){ CnvrgentConnTypeTxt  = "UE"} 
+
+} 
+get_CnvrgentConnTypeTxt()
+
+// Connection
+W_SCALE = 1e-05  // since the value of W is really small, a scaling factor is used,the "weightingFactor" is specified relative to this scale
+weightingFactor = 50 // Weighting Factor or connection strength is weightingFactor x W_SCALE
+range = 50 //Range of connection
+
+
+// Pattern of Input
+OSC_F =  40 // Oscillation frequency
+PHASE = 0 // Input Phase
+OSC_rltAmp = 0// [0, 0.5, 1] //Relative amplitude for each synchronization level of input
+Input_spk_avg_fr = 20 // The average firing rate
+L1_PHASE_RANDOM_SIG = 0 // 0, 0.25 0.5 0.75 1 --------> Level of heterogeneity in input pattern
+
+
+//Initialized values
+steps_per_ms = 1    // Resolution for data gathering set
+v_init = -70 // initial membrane potential
+tstop = 5000  // simulation runtime
+
+// Simulation Code
+strdef SimCode, SimCtrl
+SimCtrl="ModelDB"
+//Generate simulation code for current set of parameters
+
+proc getSimCode(){
+//sprint(SimCode, "%s_%s_InputFR%g_OscF%g_OscrltAmp%g_OscPhaseSig%g_Wscale%.5f_W%g_range%g_Trial%g_T%g", SimCtrl, CnvrgentConnTypeTxt, Input_spk_avg_fr, OSC_F, OSC_rltAmp, L1_PHASE_RANDOM_SIG, W_SCALE, weightingFactor, range,TRIAL_NO, tstop) //   
+sprint(SimCode, "%s_%s_InputFR%g_OscF%g_OscrltAmp%g_Wscale%.5f_W%g_range%g_Trial%g_T%g", SimCtrl, CnvrgentConnTypeTxt, Input_spk_avg_fr, OSC_F, OSC_rltAmp, W_SCALE, weightingFactor, range,TRIAL_NO, tstop) //   
+}
+//getSimCode()
+
+proc getSimCode_hg(){
+sprint(SimCode, "%s_%s_InputFR%g_OscF%g_OscrltAmp%g_OscPhaseSig%g_Wscale%g_W%g_range%g_Trial%g_T%g", SimCtrl, CnvrgentConnTypeTxt, Input_spk_avg_fr, OSC_F, OSC_rltAmp, L1_PHASE_RANDOM_SIG, W_SCALE, weightingFactor, range,TRIAL_NO, tstop) //   
+
+}
+//getSimCode_hg()
+
+// NOTE : How to reuse List and Vector  --> IClamplist.remove_all(),  p.resize(0)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////  Setting Directories for input and output
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+strdef dirResults, dirInFiles, dirPhaseFiles
+dirResults ="SimResult/" //Directory for Simulation Results
+dirInFiles = "Input/" //Location of feedforward connection
+dirPhaseFiles = "Heterogeneity/"
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Network specification interface (Helper function)
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+objref cells, cellsIN, cellsE, cellsI, cellsCN, nclist, netcon, cellsFFin 
+{cells = new List() cellsIN = new List() cellsE = new List() cellsI = new List()  cellsCN = new List()
+ nclist = new List() cellsFFin= new List() }
+
+func cell_append() {cells.append($o1)  $o1.position($2,$3,$4) 
+	$o1.setID($5,$6,$7) 
+	return cells.count - 1
+}
+
+func nc_append() { local w, delay 
+//srcindex, tarcelindex, synindex, weight, delay   //Ex. //  /* C1 -> C2.E0 */  nc_append(1,   2, 0,  0.12,1)
+  if ($3 >= 0) {
+    netcon = cells.object($1).connect2target(cells.object($2).synlist.object($3))  // Excitatory and Inhibitory effects define at the synaptic input of target cell (*post* synaptic)
+    netcon.weight = $4   netcon.delay = $5
+  }else{
+    netcon = cells.object($1).connect2target(cells.object($2).pp)
+    netcon.weight = $4   netcon.delay = $5
+  }
+  nclist.append(netcon) //nclist is list of NetCon object, The source cell can be access by call netcon.precell and access target cell by calling netcon.postcell ex. nclist.o(1).precell 
+  return nclist.count - 1 
+}
+printf("Done Network specification interface")
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Download Cells Position
+////////////////////////////////////////////////////////////////////////////////////////////////////
+strdef layer1locTxt, layer2locTxt 
+layer1locTxt = "Cells_position_source_layer1.txt" // Source Layer
+layer2locTxt = "Cells_position_target_layer2.txt"// Target Layer
+
+//load position files : Layer 1 
+objref posL1x, posL1y, posL2x, posL2y
+objref fin
+fin = new File()
+fin.ropen(layer1locTxt)  
+ 
+nL1 = fin.scanvar()
+posL1x = new Vector(nL1)
+posL1y = new Vector(nL1)
+
+for (i=0;i<nL1;i=i+1){
+	posL1x.x(i) = fin.scanvar()
+	posL1y.x(i) = fin.scanvar()
+}
+fin.close() 
+
+//load position files : Layer 2
+fin = new File()
+fin.ropen(layer2locTxt)  
+ 
+nL2 = fin.scanvar()
+posL2x = new Vector(nL2)
+posL2y = new Vector(nL2)
+
+for (i=0;i<nL2;i=i+1){
+	posL2x.x(i) = fin.scanvar()
+	posL2y.x(i) = fin.scanvar()
+}
+fin.close() 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Create Cells
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//// Create the cells in Layer 2 (H-H model)
+objref cellsL2
+cellsL2 =  new List()
+
+cIDrec = -1 //cell counter
+	str_E = cIDrec+1  
+	L2rec= -1 //cell counter
+	for (i=0;i<nL2;i=i+1){
+		cIDrec = cIDrec+1 
+		L2rec=L2rec+1
+		cell_append(new Target_Cell(),posL2x.x(i),posL2y.x(i), 0,cIDrec, L2rec,1)
+		cellsL2.append(cells.object(cIDrec))
+	} //End generate L2
+
+//// Create the cell in Layer 1 , for Poisson Spike Generator 
+objref cellsL1
+cellsL1 = new List()
+
+	str_FFin = cIDrec+1
+	FFinrec = -1 //Cell counter
+	nnInspkCell = nL1
+	FFzpos = -50 // Position of cell in z-axis - Our cells are located in x-y plane, thus we set position in z-axis to an arbitrary value
+	for (i=0;i < nnInspkCell; i=i+1){
+		cIDrec = cIDrec+1 
+		FFinrec=FFinrec+1
+		cell_append(new In_spk_VecStim(),posL1x.x(i),posL1y.x(i), FFzpos,cIDrec, FFinrec,0) // cell type = 0  for FF input
+		cellsL1.append(cells.object(cIDrec))
+	}
+	
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Specified Function for Poisson Generator (Input Spike train)
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+obfunc  OscilatingInputFR() {local osc_f, phase, osc_amp, meanFR,time localobj v1
+// FR = A sin(2*pi*f + phase) ---- equation
+// $1 = osc_f, $2 = phase (in rad), $3 = osc_amp, $4 = meanFR, $5 = resolution/ steps_per_ms , $6 = time = tstop 
+{ osc_f =$1  phase =$2 osc_amp=$3 meanFR=$4 }
+
+time = $6/ $5
+v1 = new Vector(time)
+v1.sin( osc_f,phase, 1/ $5) // dt = 1 ms
+v1.mul(osc_amp)
+v1.add(meanFR) 
+return v1 // v1 = expected firing rate at each time bin
+} 
+
+obfunc  poissonGenerator() { local tmpr,ii localobj rr, spktrain, spktime, p
+//Return vector of spiking time (in ms)
+// $1 = seed, $2 = resolution (size of one bin in ms) = steps_per_ms, $3 = time (ms), $4 = average firing rate
+	rr = new Random()
+	rr.uniform(0,1)
+	rr.Random123(RANDOM123_ID1_POISSONSPK,$1,TRIAL_NO)
+	spktrain = new Vector($3/$2) 
+	spktime = new Vector()	
+	p = OscilatingInputFR(OSC_F, PHASE,$4*OSC_rltAmp,$4, $2, $3) // // $1 = osc_f, $2 = phase (in rad), $3 = osc_amp, $4 = meanFR, $5 = resolution/ steps_per_ms , $6 = time = tstop 
+	p.div(1000/$2) // chance of spike to happen (1 ms resolution)
+	
+	for ii =0,spktrain.size-1 {
+		tmpr = rr.repick
+		
+		if (tmpr < p.x(ii)){  //spike occur
+			spktrain.x(ii) = 1
+			spktime.append($2*ii)
+		}else{
+			spktrain.x(ii) = 0
+		}
+	}
+	p.resize(0)
+	return spktime // spkvec, 1) the multiple arrival time in one VecStim is account as the only one spike. 2) The spike time vector need to be sort ascending(less...more).
+}
+ 
+//poissonGenerator_hg = poissonGenerator with heterogenity in each cell (variety in phase)
+obfunc  poissonGenerator_hg() { local tmpr,ii localobj rr, spktrain, spktime, p
+//Return vector of spiking time (in ms)
+// $1 = seed, $2 = resolution (size of one bin in ms) = steps_per_ms, $3 = time (ms), $4 = average firing rate, $5 = phase
+	rr = new Random()
+	rr.uniform(0,1)
+	rr.Random123(RANDOM123_ID1_POISSONSPK,$1,TRIAL_NO)
+	spktrain = new Vector($3/$2) 
+	spktime = new Vector()	
+	p = OscilatingInputFR(OSC_F, $5,$4*OSC_rltAmp,$4, $2, $3) // // $1 = osc_f, $2 = phase (in rad), $3 = osc_amp, $4 = meanFR, $5 = resolution/ steps_per_ms , $6 = time = tstop 
+	p.div(1000/$2) // chance of spike to happen (1 ms resolution)
+	
+	for ii =0,spktrain.size-1 {
+		tmpr = rr.repick
+		
+		if (tmpr < p.x(ii)){  //spike occur
+			spktrain.x(ii) = 1
+			spktime.append($2*ii)
+		}else{
+			spktrain.x(ii) = 0
+		}
+	}
+	p.resize(0)
+	return spktime // spkvec, 1) the multiple arrival time in one VecStim is account as the only one spike. 2) The spike time vector need to be sort ascending(less...more).
+}
+ 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Add Poisson Spike Generator to L1
+////////////////////////////////////////////////////////////////////////////////////////////////////
+objref spkvec_list
+spkvec_list = new List()
+
+objref recordseed
+recordseed = new Vector() 
+recordseed.resize(cellsL1.count)
+
+proc AddInputSpikeVector_to_L1() {
+spkvec_list.remove_all()
+
+recordseed = new Vector() 
+recordseed.resize(cellsL1.count)
+
+for i=0, cellsL1.count-1 { // Record Poisson Spike Train for each L1 cell
+
+spkvec_list.append( poissonGenerator(cellsL1.o(i).cID,steps_per_ms,tstop,Input_spk_avg_fr ))
+recordseed.x(i) = cellsL1.o(i).cID // specified ID#2 of RANDOM123 as cell ID of that input cell--> to be sure that there is no any two cells with same seed
+cellsL1.o(i).pp.play(spkvec_list.o(i)) 
+	
+}
+} 
+//AddInputSpikeVector_to_L1()
+strdef PHASEfile
+proc AddInputSpikeVector_to_L1_hg() {local spkPhase, nnPhaseL1 localobj fin
+spkvec_list.remove_all()
+
+recordseed = new Vector() 
+recordseed.resize(cellsL1.count)
+fin = new File()
+
+//// For each heterogeneity level(sigRand)
+// Read phase list file : Heterogeneity_N1150_RandomSig0.5_Trial1
+sprint(PHASEfile, "%sHeterogeneity_N%g_RandomSig%g_Trial%g.txt", dirPhaseFiles,nL1, L1_PHASE_RANDOM_SIG, TRIAL_NO)    
+//Ex : Heterogeneity_N1150_RandomSig0.5_Trial1
+fin.ropen(PHASEfile) 
+nnPhaseL1  = fin.scanvar()
+
+////////////////////////////////////////////
+
+for i=0, cellsL1.count-1 { // Record Poisson Spike Train for each L1 cell
+spkPhase = fin.scanvar()
+spkvec_list.append( poissonGenerator_hg(cellsL1.o(i).cID,steps_per_ms,tstop,Input_spk_avg_fr,spkPhase ))
+recordseed.x(i) = cellsL1.o(i).cID // specified ID#2 of RANDOM123 as cell ID of that input cell--> to be sure that there is no cell with same seed
+cellsL1.o(i).pp.play(spkvec_list.o(i)) 
+	
+}
+
+fin.close(PHASEfile)  
+} 
+//AddInputSpikeVector_to_L1_hg()
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////  Generate L1 - L2 connection
+////////////////////////////////////////////////////////////////////////////////////////////////////
+strdef  FRfile
+objref CorrInspk_info,srcV, tarV, wVec, dVec
+{CorrInspk_info = new Vector() srcV = new Vector() tarV = new Vector() wVec = new Vector()
+dVec = new Vector()}
+//strdef dirInFiles
+//dirInFiles = "Input/"
+proc MakeL1_L2_Conn(){local nnConnL1,nnInspkCell localobj fin, fout
+nclist.remove_all()
+{CorrInspk_info.resize(0) srcV.resize(0)	tarV.resize(0)	wVec.resize(0)	dVec.resize(0)}
+fin = new File()
+
+// Read Connection Files  
+sprint(FRfile, "%sConvergentInput_%s_Wscale%.5f_W%g_range%g_Trial%g.txt", dirInFiles,CnvrgentConnTypeTxt, W_SCALE, weightingFactor, range,TRIAL_NO)    
+//Ex : ConvergentInput_GG_Wscale0.00001_W50_range50_Trial1
+fin.ropen(FRfile) 
+nnConnL1  = fin.scanvar()
+nnInspkCell  = fin.scanvar() 
+
+
+CorrInspk_info = new Vector(nnConnL1)
+
+srcV = new Vector(nnConnL1)
+tarV = new Vector(nnConnL1)
+wVec = new Vector(nnConnL1)
+dVec = new Vector(nnConnL1)
+
+	for (i=0;i<nnConnL1 ;i=i+1){
+		srcV.x(i) = fin.scanvar()
+		tarV.x(i) = fin.scanvar()
+		wVec.x(i) = fin.scanvar()
+		dVec.x(i) = fin.scanvar()
+		
+		// Make Connection				
+		nc_append(cellsL1.o(srcV.x(i)).cID,cellsL2.o(tarV.x(i)).cID,0,wVec.x(i), dVec.x(i)) //srcindex, tarcelindex, synindex, weight, delay 
+	}
+fin.close(FRfile)
+	
+fout = new File()
+sprint(FRfile, "%sRecordConnList_%s.txt", dirResults ,SimCode)
+fout.wopen(FRfile) 
+
+
+fout.printf("%g\t%g\t%g\t%g\n",nL1, nL2, nclist.count, tstop) //No of cell in layer 1 , No of cell in layer 2, number of all connections
+for i = 0, nclist.count-1{
+	fout.printf("%g\t%g\t%g\t%g\n",srcV.x(i), tarV.x(i), wVec.x(i), dVec.x(i))	 // presynaptic cell ID, postsynaptic cell ID, connection strength, delay(= time at which spike from source cell arrive at target cell)
+}
+fout.close()
+} 
+//MakeL1_L2_Conn()
+	
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////  Make Vector to record L2 cell activity 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+objref vVec_List, i_cap_List
+vVec_List= new List() 
+i_cap_List = new List() 
+
+objref vVec, i_capVec
+vVec= new Vector() 
+i_capVec= new Vector() 
+
+vVec_List.remove_all() 
+i_cap_List.remove_all() 
+
+
+//Record all V in all cells 
+for id=0, cellsL2.count-1 {
+	vVec = new Vector()
+	i_capVec = new Vector()
+	
+	vVec.record(&cellsL2.o(id).soma.v(0.5),RESOLUTION) //record soma's voltage with the resolution of 1 ms
+	i_capVec.record(&cellsL2.o(id).soma.i_cap(0.5),RESOLUTION)
+	
+	vVec_List.append(vVec)
+	i_cap_List.append(i_capVec)	
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////  Run Simulation
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+proc run_all() {
+trun = startsw()
+finitialize()
+frecord_init()
+print "Called run_all()"
+tstop = $1  
+steps_per_ms = 1   
+v_init = -70
+run()
+print "Finished run_all()"
+print "Total Run Time ", startsw() - trun
+}
+// run_all(tstop)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////  Save Neuron Activity to files
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// save L1: spikes train for each cell, L2 : membrane potential and membrane current
+
+strdef saveVecFName
+saveVecFName = ""
+
+proc save_vectors_to_file(){local i,j localobj fout,id
+fout = new File()
+fout.wopen(saveVecFName)
+fout.printf("%g\t%g\t%g",cellsL2.count,0, tstop) //#E, #I, tstop[ms]  (E cells' ID always go first) :: there is no inhibitory neuron(I) in this network
+for i = 0,$o1.count-4{
+	fout.printf("\t%g",0)
+}
+fout.printf("\n")
+
+id = new Vector()
+id.indgen(0, $o1.count-1,1)
+id.printf(fout,"%g\t",0,id.size-1)
+//fout.printf("%g\n",id.x(id.size-1))
+
+for i = 0, $o1.o(0).size-1{
+	for j = 0, $o1.count-2 {
+		fout.printf("%g\t",$o1.o(j).x(i))
+	}
+	fout.printf("%g\n",$o1.o($o1.count-1).x(i))
+}
+fout.close()
+}
+
+
+proc save_SPKtrain_to_file(){local i,j localobj fout,id
+
+fout = new File()
+fout.wopen(saveVecFName)
+fout.printf("%g\t%g\t%g\n",cellsL1.count,0, tstop) //#E, #I, tstop[ms]  
+
+for i = 0, spkvec_list.count-1{
+	fout.printf("%g\t",i )
+	if(spkvec_list.o(i).size >0){
+	spkvec_list.o(i).printf(fout,"%g\t",0, spkvec_list.o(i).size-1)
+	}
+	fout.printf("\n")
+}
+fout.close()
+
+}
+
+
+// save file  
+proc save_all(){
+trun = startsw()
+
+//L1 Spikes train
+sprint(saveVecFName,"%sInputSpkTrain_%s.txt",dirResults,SimCode) 
+save_SPKtrain_to_file() // Input spike train
+
+//L2 Voltage
+sprint(saveVecFName,"%sSomaVolt_%s.txt",dirResults,SimCode)
+save_vectors_to_file(vVec_List) // membrane potential of target cells at soma
+
+//L2 i_cap
+sprint(saveVecFName,"%sSoma_i_cap_%s.txt",dirResults,SimCode) 
+save_vectors_to_file(i_cap_List) //capacitance of target cells
+print "Total Time for Saving vectors to files : ", startsw() - trun
+}
+//save_all()
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// Simulations
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+proc new_Loop_Run(){
+//print " ==================================================== "
+print "SIMULATION CODE = ", SimCode
+//print " ==================================================== "
+AddInputSpikeVector_to_L1()
+MakeL1_L2_Conn()
+run_all(tstop)
+save_all()
+}
+
+proc new_Loop_Run_hg(){
+//print " ==================================================== "
+print "SIMULATION CODE = ", SimCode
+//print " ==================================================== "
+AddInputSpikeVector_to_L1_hg()
+MakeL1_L2_Conn()
+run_all(tstop)
+save_all()
+}
+////////////////////////////////////////////////////
+// Network Configuration
+////////////////////////////////////////////////////
+/*
+Parameters List
+    CnvrgentConnTypeTxt : Code for convergence connection model (One of 'GG', 'UC', 'UE')
+    Input_spk_avg_fr: Input average firing rate (Default: 20Hz)
+    OSC_F: Oscillation Frequency of source layer (Default: 40Hz)
+    OSC_rltAmp: Oscillation relative amplitude (Strong = 1, Weak = 0.5, static = 0)
+    weightingFactor: weight for connection strength
+    range: range of connection
+    TRIAL_NO: Trial number
+    tstop : Simulation time (Default: 5000)
+Return
+*/
+
+// Directories
+dirInFiles = "Input/" //Location of feedforward connections information
+dirPhaseFiles = "Heterogeneity/"
+dirResults ="SimResult/" //Directory for Simulation Results
+
+objref RANGE_LST , W_LST, OSC_AMP_LST, L1_PHASE_RANDOM_SIG_LST // Range and weighting factor are the two parameters that control level of convergence
+RANGE_LST  = new Vector(1) // RANGE 
+RANGE_LST.x(0) = 80 
+range = RANGE_LST.x(0)
+
+W_LST = new Vector(1) // WEIGHTING FACTOR
+W_LST.x(0) =80
+weightingFactor = W_LST.x(0)
+
+OSC_AMP_LST = new Vector() // OSCILLATION AMPLITUDE (Strong = 1, Weak = 0.5, static = 0)
+OSC_AMP_LST.indgen(0,1,0.5)  //0 0.5 1
+
+L1_PHASE_RANDOM_SIG_LST = new Vector()
+L1_PHASE_RANDOM_SIG_LST.indgen(0,1,0.25)
+
+HETEROGENEITY_TEST = 0
+
+// Note : tstop have to specified in above "Parameters" part under "//Initialized values" (Line#51 )
+NUM_CONVERGENT_TYPE = 3 // Convergent Type 1:GG , 2: UC, 3: UE
+N_Trial = 10
+tstop = 100
+SimCtrl="ModelDB"
+
+// Without Heterogeneity testing
+
+for TRIAL_NO = 1, N_Trial {	
+	printf("==========================================================\n")
+	printf("\tTRIAL NO = %g\n" , TRIAL_NO)
+	printf("==========================================================\n")
+	
+    for o_ii =0, OSC_AMP_LST.size-1 {
+		OSC_rltAmp = OSC_AMP_LST.x(o_ii)
+		//printf("\t==========================================================\n")
+		printf("\t\t Oscillation relative amplitude = %g\n" , OSC_rltAmp)
+		printf("\t==========================================================\n")
+
+		for t_ii = 1, NUM_CONVERGENT_TYPE { // Innermost
+			CONVERGENT_TYPE = t_ii
+			get_CnvrgentConnTypeTxt()
+			getSimCode()
+			printf("\t\t\t\t Convergent Connection Type  = %s\n" , CnvrgentConnTypeTxt)
+			printf("\t\t\t==========================================================\n")
+			new_Loop_Run()
+			}
+	}
+}
+
+// With Heterogeneity testing
+if(HETEROGENEITY_TEST){
+    for TRIAL_NO = 1, N_Trial {	
+        printf("==========================================================\n")
+        printf("\tTRIAL NO = %g\n" , TRIAL_NO)
+        printf("==========================================================\n")
+        
+        for phi_ii = 0 , L1_PHASE_RANDOM_SIG_LST.size-1 {
+            L1_PHASE_RANDOM_SIG = L1_PHASE_RANDOM_SIG_LST.x(phi_ii)
+            //printf("\t==========================================================\n")
+            printf("\t\t L1_PHASE_RANDOM_SIG = %g\n" , L1_PHASE_RANDOM_SIG)
+            printf("\t==========================================================\n")
+            
+            for o_ii =0, OSC_AMP_LST.size-1 {
+                OSC_rltAmp = OSC_AMP_LST.x(o_ii)
+                //printf("\t==========================================================\n")
+                printf("\t\t Oscillation relative amplitude = %g\n" , OSC_rltAmp)
+                printf("\t==========================================================\n")
+                
+                for t_ii = 1, NUM_CONVERGENT_TYPE { // Innermost
+                    CONVERGENT_TYPE = t_ii
+                    get_CnvrgentConnTypeTxt()
+                    getSimCode_hg()
+                    printf("\t\t\t\t Convergent Connection Type  = %s\n" , CnvrgentConnTypeTxt)
+                    printf("\t\t\t==========================================================\n")
+                    new_Loop_Run_hg()
+                }
+            }
+        }
+    }
+
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////// End
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+print "Time for everything = ",  startsw() - T_everythng
